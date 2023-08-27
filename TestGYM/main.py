@@ -48,8 +48,8 @@ class PolicyGradient:
       for t in reversed(range(len(self.episode_rewards))):
          cumulative = cumulative * self.gamma + self.episode_rewards[t]
          discounted_episode_rewards[t] = cumulative
-      discounted_episode_rewards -= np.mean(discounted_episode_rewards)
-      discounted_episode_rewards /= np.std(discounted_episode_rewards)
+      #discounted_episode_rewards -= np.mean(discounted_episode_rewards)
+      # discounted_episode_rewards /= np.std(discounted_episode_rewards)
       return discounted_episode_rewards
 
    def learn(self):
@@ -74,14 +74,14 @@ observation, info = env.reset(seed=42)
 
 
 RENDER_ENV = False
-EPISODES = 5000
+EPISODES = 1000000
 rewards = []
 RENDER_REWARD_MIN = 5000
 
 PG = PolicyGradient(
     n_x = env.observation_space.shape[0],
     n_y = env.action_space.n,
-    learning_rate=0.05,
+    learning_rate=0.00001,
     reward_decay=0.99,
 )
 
@@ -135,7 +135,7 @@ for episode in range(EPISODES):
 trained_policy_network = PG.model
 env = gym.make("LunarLander-v2", render_mode='human')
 # Reset the environment to start a new episode
-EPISODES_test=10
+EPISODES_test=10000
 for episode in range(EPISODES_test):
       observation = env.reset()
       observation = observation[0]
