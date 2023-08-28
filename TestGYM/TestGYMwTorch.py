@@ -133,7 +133,7 @@ for i in tqdm(range(100)):
 
     print("mean reward: %.3f" % (np.mean(rewards)))
 
-    if np.mean(rewards) > 600:
+    if np.mean(rewards) > 800:
         print("You Win!")  # but you can train even further
         break
 
