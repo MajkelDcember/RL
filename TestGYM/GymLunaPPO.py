@@ -5,7 +5,9 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import torch.distributions as distributions
+#from scipy.special import log_softmax
+ 
 SEED = 1234
 
 env = gym.make("LunarLander-v2", render_mode="rgb_array")
@@ -26,12 +28,53 @@ plt.imshow(env.render())
 
 
 dropout = 0.1
-model = nn.Sequential(nn.Linear(8, 128),nn.Dropout(dropout), nn.ReLU(),
-                       nn.Linear(128, 128),nn.Dropout(dropout), nn.ReLU(),
-                       nn.Linear(128, 4))
 
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, dropout = 0.1):
+        super().__init__()
+        
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Dropout(dropout),
+            nn.PReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Dropout(dropout),
+            nn.PReLU(),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        
+    def forward(self, x):
+        x = self.net(x)
+        return x
+
+INPUT_DIM = env.observation_space.shape[0]
+HIDDEN_DIM = 128
+OUTPUT_DIM = env.action_space.n
+
+
+
+
+
+actor = MLP(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM)
+critic = MLP(INPUT_DIM, HIDDEN_DIM, 1)
 #print("Weight shapes:", [w.shape for w in model.parameters()])
 
+
+class ActorCritic(nn.Module):
+    def __init__(self, actor, critic):
+        super().__init__()
+        
+        self.actor = actor
+        self.critic = critic
+        
+    def forward(self, state):
+        
+        action_pred = self.actor(state)
+        value_pred = self.critic(state)
+        
+        return action_pred, value_pred
+
+policy = ActorCritic(actor, critic)
 
 def predict_probs(states):
     """
@@ -43,157 +86,193 @@ def predict_probs(states):
 
     states = torch.tensor(states)
     #print(torch.tensor(model(states)))
-    prob_weights = torch.softmax(torch.tensor(model(states)), dim=1)
+    prob_weights = torch.softmax(torch.tensor(actor(states)), dim=1)
     #print(prob_weights)
     return prob_weights.detach().numpy()
 
 
 
-def generate_session(env, t_max=1000):
+def calculate_returns(rewards,  gamma=0.99  ):
+    T = len(rewards)
+    G=np.zeros(T)
+    G[T-1]=rewards[T-1]
+    for t in range(T-1):
+        G[T-2-t] = rewards[T-2-t] +gamma * G[T-1-t]
+    
+    G = (G - G.mean()) / G.std()
+    return G
+
+def calculate_advantages(returns, values, normalize = True):
+    
+    advantages = returns - values
+    
+    if normalize:
+        
+        advantages = (advantages - advantages.mean()) / advantages.std()
+        
+    return advantages
+
+LEARNING_RATE = 0.0005
+
+optimizer = torch.optim.Adam(policy.parameters(), lr = LEARNING_RATE)
+
+
+def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip, t_max=1000):
     """
     Play a full session with REINFORCE agent.
     Returns sequences of states, actions, and rewards.
     """
     # arrays to record session
     states, actions, rewards = [], [], []
+    log_prob_actions = []
+    values = []
+    episode_reward = 0
     #s = np.array((env.reset()[0],env.reset()[0],env.reset()[0],env.reset()[0])).reshape(32,)
     s = np.array(env.reset()[0])
     for t in range(t_max):
         # action probabilities array aka pi(a|s)
         action_probs = predict_probs(np.array([s]))
-        #print(action_probs[0])
+        action_prob = torch.FloatTensor(action_probs).unsqueeze(0)
+        log_prob_action = np.log(action_probs)
         # Sample action with given probabilities.
-        a = np.random.choice(range(4), p=action_probs[0])
-        # print(a)
+        dist = distributions.Categorical(action_prob)
+        
+        a = dist.sample()
 
         new_s, r, terminated, truncated, info = env.step(a)
         # record session history to train later
+        s = torch.FloatTensor(s).unsqueeze(0)
         states.append(s)
+        print(a)
+        #a = torch.FloatTensor(a).unsqueeze(0)
         actions.append(a)
         rewards.append(r)
-
+        log_prob_actions.append(log_prob_action)
         #print(s[24:32])
         s = new_s
         if terminated or truncated:
             #print('terminated or truncated')
             break
-
-    return states, actions, rewards
-
-def get_cumulative_rewards(rewards,  gamma=0.99  ):
-    T = len(rewards)
-    G=np.zeros(T)
-    G[T-1]=rewards[T-1]
-    for t in range(T-1):
-        G[T-2-t] = rewards[T-2-t] +gamma * G[T-1-t]
-    return G
-
-
-#states, actions, rewards = generate_session(env)
-#get_cumulative_rewards(rewards)
-
-# Your code: define optimizers
-optimizer = torch.optim.Adam(model.parameters(), 1e-5,(0.9, 0.999),maximize=True)
+    
+    states = torch.cat(states)
+    print(actions)
+    actions = torch.cat(actions)    
+    log_prob_actions = torch.cat(log_prob_actions)
+    values = torch.cat(values).squeeze(-1)
+    
+    returns = calculate_returns(rewards, discount_factor)
+    advantages = calculate_advantages(returns, values)
+    
+    policy_loss, value_loss = update_policy(policy, states, actions, log_prob_actions, advantages, returns, optimizer, ppo_steps, ppo_clip)
 
 
-def train_on_session1(states, actions, rewards, gamma=0.99, entropy_coef=1e-4):
-    """
-    Takes a sequence of states, actions and rewards produced by generate_session.
-    Updates agent's weights by following the policy gradient above.
-    Please use Adam optimizer with default parameters.
-    """
-
-    # cast everything into torch tensors
-    states = torch.tensor(states, dtype=torch.float32)
-    actions = torch.tensor(actions, dtype=torch.int64)
-    cumulative_returns = np.array(get_cumulative_rewards(rewards, gamma))
-    cumulative_returns = torch.tensor(cumulative_returns, dtype=torch.float32)
-
-    # predict logits, probas and log-probas using an agent.
-    logits = model(states)
-    probs = nn.functional.softmax(logits, -1)
-    log_probs = nn.functional.log_softmax(logits, -1)
-
-    assert all(isinstance(v, torch.Tensor) for v in [logits, probs, log_probs]), \
-        "please use compute using torch tensors and don't use predict_probs function"
-
-    # select log-probabilities for chosen actions, log pi(a_i|s_i)
-    log_probs_for_actions = torch.sum(
-        log_probs * F.one_hot(actions, env.action_space.n), dim=1)
-    #print(log_probs_for_actions)
-    #print(cumulative_returns)
-    # Compute loss here. Don't forgen entropy regularization with `entropy_coef`
-    entropy = -torch.dot(torch.exp(log_probs_for_actions),log_probs_for_actions)
-    #print(entropy)
-
-    #loss = torch.dot(cumulative_returns,log_probs_for_actions) / ( len(log_probs_for_actions)) + entropy_coef*entropy
-    #print(loss.detach().numpy())
-    loss = entropy
-    # Gradient descent step
-    optimizer.zero_grad()  # clear gradients
-    loss.backward()  # add new gradients
-    optimizer.step()
-
-    # technical: return session rewards to print them later
-    return np.sum(rewards)
-
-def train_on_session2(states, actions, rewards, gamma=0.99, entropy_coef=.1):
-    """
-    Takes a sequence of states, actions and rewards produced by generate_session.
-    Updates agent's weights by following the policy gradient above.
-    Please use Adam optimizer with default parameters.
-    """
-
-    # cast everything into torch tensors
-    states = torch.tensor(states, dtype=torch.float32)
-    actions = torch.tensor(actions, dtype=torch.int64)
-    cumulative_returns = np.array(get_cumulative_rewards(rewards, gamma))
-    cumulative_returns = torch.tensor(cumulative_returns, dtype=torch.float32)
-
-    # predict logits, probas and log-probas using an agent.
-    logits = model(states)
-    probs = nn.functional.softmax(logits, -1)
-    log_probs = nn.functional.log_softmax(logits, -1)
-
-    assert all(isinstance(v, torch.Tensor) for v in [logits, probs, log_probs]), \
-        "please use compute using torch tensors and don't use predict_probs function"
-
-    # select log-probabilities for chosen actions, log pi(a_i|s_i)
-    log_probs_for_actions = torch.sum(
-        log_probs * F.one_hot(actions, env.action_space.n), dim=1)
-    #print(log_probs_for_actions)
-    #print(cumulative_returns)
-    # Compute loss here. Don't forgen entropy regularization with `entropy_coef`
-    entropy = -torch.dot(torch.exp(log_probs_for_actions),log_probs_for_actions)
-    #print(entropy)
-
-    loss = torch.dot(cumulative_returns,log_probs_for_actions) / ( len(log_probs_for_actions)) + entropy_coef*entropy
-    #print(loss.detach().numpy())
-    #loss = entropy
-    # Gradient descent step
-    optimizer.zero_grad()  # clear gradients
-    loss.backward()  # add new gradients
-    optimizer.step()
-
-    # technical: return session rewards to print them later
-    return np.sum(rewards)
+    return policy_loss, value_loss, episode_reward
 
 
-for i in tqdm(range(20000)):
-    rewards = [train_on_session1(*generate_session(env)) for _ in range(1)]  # generate new sessions
 
-    #print("mean reward: %.3f" % (np.mean(rewards)))
 
-    if np.mean(rewards) > 200:
-        print("You Win!")  # but you can train even further
-        break
-for i in tqdm(range(2000)):
-    rewards = [train_on_session2(*generate_session(env)) for _ in range(100)]  # generate new sessions
 
-    print("mean reward: %.3f" % (np.mean(rewards)))
+def update_policy(policy, states, actions, log_prob_actions, advantages, returns, optimizer, ppo_steps, ppo_clip):
+    total_policy_loss = 0 
+    total_value_loss = 0
+    
+    states = states.detach()
+    actions = actions.detach()
+    log_prob_actions = log_prob_actions.detach()
+    advantages = advantages.detach()
+    returns = returns.detach()
+    
+    for _ in range(ppo_steps):
+                
+        #get new log prob of actions for all input states
+        action_pred, value_pred = policy(states)
+        value_pred = value_pred.squeeze(-1)
+        action_prob = F.softmax(action_pred, dim = -1)
+        dist = distributions.Categorical(action_prob)
+        
+        #new log prob using old actions
+        new_log_prob_actions = dist.log_prob(actions)
+        
+        policy_ratio = (new_log_prob_actions - log_prob_actions).exp()
+                
+        policy_loss_1 = policy_ratio * advantages
+        policy_loss_2 = torch.clamp(policy_ratio, min = 1.0 - ppo_clip, max = 1.0 + ppo_clip) * advantages
+        
+        policy_loss = - torch.min(policy_loss_1, policy_loss_2).mean()
+        
+        value_loss = F.smooth_l1_loss(returns, value_pred).mean()
+    
+        optimizer.zero_grad()
 
-    if np.mean(rewards) > 200:
-        print("You Win!")  # but you can train even further
+        policy_loss.backward()
+        value_loss.backward()
+
+        optimizer.step()
+    
+        total_policy_loss += policy_loss.item()
+        total_value_loss += value_loss.item()
+    
+    return total_policy_loss / ppo_steps, total_value_loss / ppo_steps
+
+def evaluate(env, policy):
+    
+    policy.eval()
+    
+    rewards = []
+    done = False
+    episode_reward = 0
+
+    state = env.reset()
+
+    while not done:
+
+        state = torch.FloatTensor(state).unsqueeze(0)
+
+        with torch.no_grad():
+        
+            action_pred, _ = policy(state)
+
+            action_prob = F.softmax(action_pred, dim = -1)
+                
+        action = torch.argmax(action_prob, dim = -1)
+                
+        state, reward, done, _ = env.step(action.item())
+
+        episode_reward += reward
+        
+    return episode_reward
+
+MAX_EPISODES = 1_000
+DISCOUNT_FACTOR = 0.99
+N_TRIALS = 25
+REWARD_THRESHOLD = 200
+PRINT_EVERY = 10
+PPO_STEPS = 5
+PPO_CLIP = 0.2
+
+train_rewards = []
+test_rewards = []
+
+for episode in range(1, MAX_EPISODES+1):
+    
+    policy_loss, value_loss, train_reward = train(env, policy, optimizer, DISCOUNT_FACTOR, PPO_STEPS, PPO_CLIP)
+    
+    test_reward = evaluate(env, policy)
+    
+    train_rewards.append(train_reward)
+    test_rewards.append(test_reward)
+    
+    mean_train_rewards = np.mean(train_rewards[-N_TRIALS:])
+    mean_test_rewards = np.mean(test_rewards[-N_TRIALS:])
+    
+    if episode % PRINT_EVERY == 0:
+        
+        print(f'| Episode: {episode:3} | Mean Train Rewards: {mean_train_rewards:7.1f} | Mean Test Rewards: {mean_test_rewards:7.1f} |')
+    
+    if mean_test_rewards >= REWARD_THRESHOLD:
+        
+        print(f'Reached reward threshold in {episode} episodes')
+        
         break
 
 env = gym.make("LunarLander-v2", render_mode='human')
