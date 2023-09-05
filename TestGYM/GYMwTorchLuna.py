@@ -5,7 +5,7 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+ 
 SEED = 1234
 
 env = gym.make("LunarLander-v2", render_mode="rgb_array")
@@ -53,9 +53,10 @@ OUTPUT_DIM = env.action_space.n
 
 
 
-model = MLP(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM)
+actor = MLP(INPUT_DIM, HIDDEN_DIM, OUTPUT_DIM)
 critic = MLP(INPUT_DIM, HIDDEN_DIM, 1)
 #print("Weight shapes:", [w.shape for w in model.parameters()])
+
 
 
 def predict_probs(states):
@@ -68,7 +69,7 @@ def predict_probs(states):
 
     states = torch.tensor(states)
     #print(torch.tensor(model(states)))
-    prob_weights = torch.softmax(torch.tensor(model(states)), dim=1)
+    prob_weights = torch.softmax(torch.tensor(actor(states)), dim=1)
     #print(prob_weights)
     return prob_weights.detach().numpy()
 
@@ -130,56 +131,9 @@ def calculate_advantages(returns, values, normalize = True):
 #get_cumulative_rewards(rewards)
 
 # Your code: define optimizers
-optimizer1 = torch.optim.Adam(model.parameters(), 2e-4,maximize=True)
+optimizer1 = torch.optim.Adam(actor.parameters(), 2e-4,maximize=True)
 optimizer2 = torch.optim.Adam(critic.parameters(), 1e-2,maximize=False)
 
-def train_on_session1(states, actions, rewards, gamma=0.99, entropy_coef=1):
-    """
-    Takes a sequence of states, actions and rewards produced by generate_session.
-    Updates agent's weights by following the policy gradient above.
-    Please use Adam optimizer with default parameters.
-    """
-
-    # cast everything into torch tensors
-    states = torch.tensor(states, dtype=torch.float32)
-    actions = torch.tensor(actions, dtype=torch.int64)
-    cumulative_returns = np.array(get_cumulative_rewards(rewards, gamma))
-    cumulative_returns = torch.tensor(cumulative_returns, dtype=torch.float32)  # Convert to a tensor
-    #cumulative_returns = torch.tensor(cumulative_returns, dtype=torch.float32)
-    values = critic(states).squeeze()
-    #advantage = calculate_advantages(cumulative_returns,values)
-    #advantage = calculate_advantages(cumulative_returns,values)
-    # predict logits, probas and log-probas using an agent.
-    logits = model(states)
-    probs = nn.functional.softmax(logits, -1)
-    log_probs = nn.functional.log_softmax(logits, -1)
-
-    assert all(isinstance(v, torch.Tensor) for v in [logits, probs, log_probs]), \
-        "please use compute using torch tensors and don't use predict_probs function"
-
-    # select log-probabilities for chosen actions, log pi(a_i|s_i)
-    log_probs_for_actions = torch.sum(
-        log_probs * F.one_hot(actions, env.action_space.n), dim=1)
-    #print(log_probs_for_actions)
-    #print(cumulative_returns)
-    # Compute loss here. Don't forgen entropy regularization with `entropy_coef`
-    #entropy = -torch.dot(torch.exp(log_probs_for_actions),log_probs_for_actions)
-    #print(entropy)
-
-    #loss = torch.dot(cumulative_returns,log_probs_for_actions) / ( len(log_probs_for_actions)) + entropy_coef*entropy
-    #print(loss.detach().numpy())
-    #loss = entropy
-    loss2 = F.smooth_l1_loss(cumulative_returns, values).mean()
-    # Gradient descent step
-    #optimizer1.zero_grad()  # clear gradients
-    optimizer2.zero_grad()
-    #loss.backward()  # add new gradients
-    loss2.backward()
-    #optimizer1.step()
-    optimizer2.step()
-
-    # technical: return session rewards to print them later
-    return rewards
 
 def train_on_session2(states, actions, rewards, gamma=0.995, entropy_coef=0):
     """
@@ -198,7 +152,7 @@ def train_on_session2(states, actions, rewards, gamma=0.995, entropy_coef=0):
     v = torch.tensor(values,requires_grad=False)
     advantage = calculate_advantages(cumulative_returns,v)
     # predict logits, probas and log-probas using an agent.
-    logits = model(states)
+    logits = actor(states)
     probs = nn.functional.softmax(logits, -1)
     log_probs = nn.functional.log_softmax(logits, -1)
 
@@ -228,16 +182,8 @@ def train_on_session2(states, actions, rewards, gamma=0.995, entropy_coef=0):
     return np.sum(rewards)
 
 
-for i in tqdm(range(1000)):
-    rewards = [train_on_session1(*generate_session(env)) for _ in range(10)]  # generate new sessions
 
-    #print("mean reward: %.3f" % (np.mean(rewards)))
-
-    # if np.mean(rewards) > 200:
-    #     print("You Win!")  # but you can train even further
-    #     break
-
-for i in tqdm(range(5000)):
+for i in tqdm(range(500)):
     rewards = [train_on_session2(*generate_session(env)) for _ in range(200)]  # generate new sessions
 
     print("mean reward: %.3f" % (np.mean(rewards)))

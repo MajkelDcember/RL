@@ -76,19 +76,7 @@ class ActorCritic(nn.Module):
 
 policy = ActorCritic(actor, critic)
 
-def predict_probs(states):
-    """
-    Predict action probabilities given states.
-    :param states: numpy array of shape [batch, state_shape]
-    :returns: numpy array of shape [batch, n_actions]
-    """
-    # convert states, compute logits, use softmax to get probability
 
-    states = torch.tensor(states)
-    #print(torch.tensor(model(states)))
-    prob_weights = torch.softmax(torch.tensor(actor(states)), dim=1)
-    #print(prob_weights)
-    return prob_weights.detach().numpy()
 
 
 
@@ -99,6 +87,8 @@ def calculate_returns(rewards,  gamma=0.99  ):
     for t in range(T-1):
         G[T-2-t] = rewards[T-2-t] +gamma * G[T-1-t]
     
+    G = torch.tensor(G)
+
     G = (G - G.mean()) / G.std()
     return G
 
@@ -116,46 +106,49 @@ LEARNING_RATE = 0.0005
 
 optimizer = torch.optim.Adam(policy.parameters(), lr = LEARNING_RATE)
 
-
-def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip, t_max=1000):
-    """
-    Play a full session with REINFORCE agent.
-    Returns sequences of states, actions, and rewards.
-    """
-    # arrays to record session
-    states, actions, rewards = [], [], []
+print(policy.actor)
+def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip):
+        
+    policy.train()
+        
+    states = []
+    actions = []
     log_prob_actions = []
     values = []
+    rewards = []
+    done = False
     episode_reward = 0
-    #s = np.array((env.reset()[0],env.reset()[0],env.reset()[0],env.reset()[0])).reshape(32,)
-    s = np.array(env.reset()[0])
-    for t in range(t_max):
-        # action probabilities array aka pi(a|s)
-        action_probs = predict_probs(np.array([s]))
-        action_prob = torch.FloatTensor(action_probs).unsqueeze(0)
-        log_prob_action = np.log(action_probs)
-        # Sample action with given probabilities.
+
+    state = env.reset()
+    state = state[0]
+    while not done:
+
+        
+        state = torch.FloatTensor(state).unsqueeze(0)
+
+        #append state here, not after we get the next state from env.step()
+        states.append(state)
+        
+        action_pred, value_pred = policy(state)
+                
+        action_prob = F.softmax(action_pred, dim = -1)
+                
         dist = distributions.Categorical(action_prob)
         
-        a = dist.sample()
+        action = dist.sample()
+        
+        log_prob_action = dist.log_prob(action)
+        
+        state, reward, done, _ , _ = env.step(action.item())
 
-        new_s, r, terminated, truncated, info = env.step(a)
-        # record session history to train later
-        s = torch.FloatTensor(s).unsqueeze(0)
-        states.append(s)
-        print(a)
-        #a = torch.FloatTensor(a).unsqueeze(0)
-        actions.append(a)
-        rewards.append(r)
+        actions.append(action)
         log_prob_actions.append(log_prob_action)
-        #print(s[24:32])
-        s = new_s
-        if terminated or truncated:
-            #print('terminated or truncated')
-            break
+        values.append(value_pred)
+        rewards.append(reward)
+        
+        episode_reward += reward
     
     states = torch.cat(states)
-    print(actions)
     actions = torch.cat(actions)    
     log_prob_actions = torch.cat(log_prob_actions)
     values = torch.cat(values).squeeze(-1)
@@ -164,7 +157,6 @@ def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip, t_max=10
     advantages = calculate_advantages(returns, values)
     
     policy_loss, value_loss = update_policy(policy, states, actions, log_prob_actions, advantages, returns, optimizer, ppo_steps, ppo_clip)
-
 
     return policy_loss, value_loss, episode_reward
 
@@ -218,11 +210,11 @@ def evaluate(env, policy):
     
     policy.eval()
     
-    rewards = []
     done = False
     episode_reward = 0
 
     state = env.reset()
+    state = state[0]
 
     while not done:
 
@@ -236,7 +228,7 @@ def evaluate(env, policy):
                 
         action = torch.argmax(action_prob, dim = -1)
                 
-        state, reward, done, _ = env.step(action.item())
+        state, reward, done, _ , _ = env.step(action.item())
 
         episode_reward += reward
         
@@ -275,26 +267,5 @@ for episode in range(1, MAX_EPISODES+1):
         
         break
 
-env = gym.make("LunarLander-v2", render_mode='human')
-EPISODES_test=10000
-for episode in range(EPISODES_test):
-      observation = env.reset()
-      #observation = np.array((observation[0],observation[0],observation[0],observation[0])).reshape(32,)
-      observation = np.array(observation[0])
-      # Execute the environment using the learned policy
-      while True:
-          env.render()  # Render the environment
 
-          # Choose an action based on the learned policy
-          action_probs = predict_probs(np.array([observation]))
-          #print(action_probs)
-          # Sample action with given probabilities.
-          a = np.argmax(action_probs[0])
-          # Perform the action in the environment
-          new_observation, reward, done, truncated, _ = env.step(a)
-          observation = new_observation
-          if truncated:
-              # print('terminated or truncated')
-              break
-          if done:
-              break  # Episode is finished
+torch.save(policy.state_dict(), "policy.pt")
