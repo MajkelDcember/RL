@@ -107,7 +107,7 @@ LEARNING_RATE = 0.0005
 optimizer = torch.optim.Adam(policy.parameters(), lr = LEARNING_RATE)
 
 print(policy.actor)
-def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip):
+def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip, t_max=1000):
         
     policy.train()
         
@@ -121,8 +121,7 @@ def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip):
 
     state = env.reset()
     state = state[0]
-    while not done:
-
+    for t in range(t_max):
         
         state = torch.FloatTensor(state).unsqueeze(0)
 
@@ -139,7 +138,7 @@ def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip):
         
         log_prob_action = dist.log_prob(action)
         
-        state, reward, done, _ , _ = env.step(action.item())
+        state, reward,  terminated, truncated, info  = env.step(action.item())
 
         actions.append(action)
         log_prob_actions.append(log_prob_action)
@@ -147,6 +146,9 @@ def train(env, policy, optimizer, discount_factor, ppo_steps, ppo_clip):
         rewards.append(reward)
         
         episode_reward += reward
+        if terminated or truncated:
+            #print('terminated or truncated')
+            break
     
     states = torch.cat(states)
     actions = torch.cat(actions)    
